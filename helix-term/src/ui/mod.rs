@@ -242,29 +242,40 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         .build()
         .filter_map(|entry| {
             let entry = entry.ok()?;
-            if !entry.file_type()?.is_file() {
-                return None;
-            }
+            // if !entry.file_type()?.is_file() {
+            //     return None;
+            // }
             Some(entry.into_path())
         });
     log::debug!("file_picker init {:?}", Instant::now().duration_since(now));
-
+    // todo need to add empty dirs 
     let columns = [PickerColumn::new(
         "path",
         |item: &PathBuf, data: &FilePickerData| {
             let path = item.strip_prefix(&data.root).unwrap_or(item);
             let mut spans = Vec::with_capacity(3);
-            if let Some(dirs) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            if let Some(_dirs) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                let parent_num = path.ancestors().count();
+                let x = '_';
+                let tabs = x.to_string().repeat(parent_num);
+
                 spans.extend([
-                    Span::styled(dirs.to_string_lossy(), data.directory_style),
+                    Span::styled(tabs, data.directory_style),
+                    // Span::styled(dirs.to_string_lossy(), data.directory_style),
                     Span::styled(std::path::MAIN_SEPARATOR_STR, data.directory_style),
                 ]);
             }
-            let filename = path
-                .file_name()
-                .expect("normalized paths can't end in `..`")
-                .to_string_lossy();
-            spans.push(Span::raw(filename));
+            if path.is_file(){
+                let filename = path
+                    .file_name()
+                    .expect("normalized paths can't end in `..`")
+                    .to_string_lossy();
+                spans.push(Span::raw(filename));
+                
+            } else {
+                let path = item.strip_prefix(&data.root).unwrap_or(item);
+                spans.push(Span::raw(path));
+            }
             Spans::from(spans).into()
         },
     )];
