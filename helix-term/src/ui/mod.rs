@@ -190,11 +190,86 @@ pub struct FilePickerData {
     root: PathBuf,
     directory_style: Style,
 }
-type FilePicker = Picker<PathBuf, FilePickerData>;
+
+/// Entry for tree-style file picker display
+#[derive(Clone, Debug)]
+pub struct TreeFileEntry {
+    pub path: PathBuf,
+    /// Depth level in the tree (number of directory components)
+    pub depth: usize,
+    /// Whether this is the last item in its parent directory
+    pub is_last: bool,
+    /// For each ancestor level, whether there are more siblings after
+    pub ancestors_have_next: Vec<bool>,
+}
+
+type FilePicker = Picker<TreeFileEntry, FilePickerData>;
+
+/// Build tree entries from a flat list of file paths with tree structure metadata
+fn build_tree_entries(mut files: Vec<PathBuf>, root: &Path) -> Vec<TreeFileEntry> {
+    // Sort by relative path to group files by directory
+    files.sort_by(|a, b| {
+        let a_rel = a.strip_prefix(root).unwrap_or(a);
+        let b_rel = b.strip_prefix(root).unwrap_or(b);
+        a_rel.cmp(b_rel)
+    });
+
+    let mut entries = Vec::with_capacity(files.len());
+
+    for (i, path) in files.iter().enumerate() {
+        let relative = path.strip_prefix(root).unwrap_or(path);
+        let depth = relative.components().count().saturating_sub(1);
+        let parent = relative.parent().unwrap_or(Path::new(""));
+
+        // Check if this is the last file in its parent directory
+        let is_last = if i + 1 < files.len() {
+            let next_relative = files[i + 1].strip_prefix(root).unwrap_or(&files[i + 1]);
+            let next_parent = next_relative.parent().unwrap_or(Path::new(""));
+            // Last if next file is in a different directory or shallower depth
+            next_parent != parent
+        } else {
+            true
+        };
+
+        // Compute ancestors_have_next by checking if there are more items at each ancestor level
+        let mut ancestors_have_next = Vec::with_capacity(depth);
+        for d in 0..depth {
+            // Get ancestor path at depth d
+            let ancestor: PathBuf = relative.components().take(d + 1).collect();
+
+            // Check if any following file shares this ancestor but has different next component
+            let has_more = files[i + 1..].iter().any(|other| {
+                let other_rel = other.strip_prefix(root).unwrap_or(other);
+                if other_rel.components().count() <= d {
+                    return false;
+                }
+                let other_ancestor: PathBuf = other_rel.components().take(d + 1).collect();
+                // Same ancestor at level d means there's more at this level
+                other_ancestor == ancestor && {
+                    // But only if it's a sibling (same parent at level d+1 or different subtree)
+                    let parent_at_d: PathBuf = relative.components().take(d + 1).collect();
+                    let other_parent_at_d: PathBuf = other_rel.components().take(d + 1).collect();
+                    parent_at_d == other_parent_at_d
+                }
+            });
+            ancestors_have_next.push(has_more);
+        }
+
+        entries.push(TreeFileEntry {
+            path: path.clone(),
+            depth,
+            is_last,
+            ancestors_have_next,
+        });
+    }
+
+    entries
+}
 
 pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     use ignore::{types::TypesBuilder, WalkBuilder};
     use std::time::Instant;
+    use tui::symbols::line;
 
     let config = editor.config();
     let data = FilePickerData {
@@ -236,68 +311,88 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         .build()
         .expect("failed to build excluded_types");
     walk_builder.types(excluded_types);
-    let mut files = walk_builder.build().filter_map(|entry| {
-        let entry = entry.ok()?;
-        if !entry.file_type()?.is_file() {
-            return None;
-        }
-        Some(entry.into_path())
-    });
+
+    // Collect all files for tree structure
+    let files: Vec<PathBuf> = walk_builder
+        .build()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type()?.is_file() {
+                return None;
+            }
+            Some(entry.into_path())
+        })
+        .collect();
+
+    // Build tree entries
+    let tree_entries = build_tree_entries(files, &root);
     log::debug!("file_picker init {:?}", Instant::now().duration_since(now));
 
     let columns = [PickerColumn::new(
         "path",
-        |item: &PathBuf, data: &FilePickerData| {
-            let path = item.strip_prefix(&data.root).unwrap_or(item);
-            let mut spans = Vec::with_capacity(3);
-            if let Some(dirs) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                spans.extend([
-                    Span::styled(dirs.to_string_lossy(), data.directory_style),
-                    Span::styled(std::path::MAIN_SEPARATOR_STR, data.directory_style),
-                ]);
+        |item: &TreeFileEntry, data: &FilePickerData| {
+            let path = item.path.strip_prefix(&data.root).unwrap_or(&item.path);
+            let mut spans = Vec::with_capacity(item.depth + 3);
+
+            // Build tree prefix for each ancestor level
+            for &has_next in &item.ancestors_have_next {
+                if has_next {
+                    spans.push(Span::styled(line::VERTICAL, data.directory_style));
+                    spans.push(Span::raw("   "));
+                } else {
+                    spans.push(Span::raw("    "));
+                }
             }
+
+            // Add branch connector for this item
+            if item.depth > 0 || !item.ancestors_have_next.is_empty() {
+                let branch = if item.is_last {
+                    line::BOTTOM_LEFT
+                } else {
+                    line::VERTICAL_RIGHT
+                };
+                spans.push(Span::styled(branch, data.directory_style));
+                spans.push(Span::styled(
+                    format!("{}{} ", line::HORIZONTAL, line::HORIZONTAL),
+                    data.directory_style,
+                ));
+            }
+
+            // Show directory path styled, then filename
+            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                spans.push(Span::styled(
+                    format!("{}/", parent.to_string_lossy()),
+                    data.directory_style,
+                ));
+            }
+
             let filename = path
                 .file_name()
                 .expect("normalized paths can't end in `..`")
                 .to_string_lossy();
             spans.push(Span::raw(filename));
+
             Spans::from(spans).into()
         },
     )];
-    let picker = Picker::new(columns, 0, [], data, move |cx, path: &PathBuf, action| {
-        if let Err(e) = cx.editor.open(path, action) {
-            let err = if let Some(err) = e.source() {
-                format!("{}", err)
-            } else {
-                format!("unable to open \"{}\"", path.display())
-            };
-            cx.editor.set_error(err);
-        }
-    })
-    .with_preview(|_editor, path| Some((path.as_path().into(), None)));
-    let injector = picker.injector();
-    let timeout = std::time::Instant::now() + std::time::Duration::from_millis(30);
 
-    let mut hit_timeout = false;
-    for file in &mut files {
-        if injector.push(file).is_err() {
-            break;
-        }
-        if std::time::Instant::now() >= timeout {
-            hit_timeout = true;
-            break;
-        }
-    }
-    if hit_timeout {
-        std::thread::spawn(move || {
-            for file in files {
-                if injector.push(file).is_err() {
-                    break;
-                }
+    Picker::new(
+        columns,
+        0,
+        tree_entries,
+        data,
+        move |cx, entry: &TreeFileEntry, action| {
+            if let Err(e) = cx.editor.open(&entry.path, action) {
+                let err = if let Some(err) = e.source() {
+                    format!("{}", err)
+                } else {
+                    format!("unable to open \"{}\"", entry.path.display())
+                };
+                cx.editor.set_error(err);
             }
-        });
-    }
-    picker
+        },
+    )
+    .with_preview(|_editor, entry| Some((entry.path.as_path().into(), None)))
 }
 
 type FileExplorer = Picker<(PathBuf, bool), (PathBuf, Style)>;
