@@ -185,10 +185,11 @@ pub fn raw_regex_prompt(
     cx.push_layer(Box::new(prompt));
 }
 
-#[derive(Debug)]
 pub struct FilePickerData {
     root: PathBuf,
     directory_style: Style,
+    /// Whether the picker is currently filtering (non-empty query)
+    is_filtering: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Entry for tree-style file picker display
@@ -305,10 +306,15 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     use std::time::Instant;
     use tui::symbols::line;
 
+    use std::sync::{atomic::AtomicBool, Arc};
+
     let config = editor.config();
+    let is_filtering = Arc::new(AtomicBool::new(false));
+    let is_filtering_for_callback = is_filtering.clone();
     let data = FilePickerData {
         root: root.clone(),
         directory_style: editor.theme.get("ui.text.directory"),
+        is_filtering,
     };
 
     let now = Instant::now();
@@ -365,7 +371,37 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
     let columns = [PickerColumn::new(
         "path",
         |item: &TreeFileEntry, data: &FilePickerData| {
+            use std::sync::atomic::Ordering;
+
             let path = item.path.strip_prefix(&data.root).unwrap_or(&item.path);
+
+            // When filtering, show full path instead of tree structure
+            if data.is_filtering.load(Ordering::Relaxed) {
+                if item.is_dir {
+                    // Show directory path with trailing slash
+                    return Span::styled(
+                        format!("{}/", path.to_string_lossy()),
+                        data.directory_style,
+                    )
+                    .into();
+                }
+                // Show directory part styled, filename normal
+                let mut spans = Vec::new();
+                if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    spans.push(Span::styled(
+                        format!("{}/", parent.to_string_lossy()),
+                        data.directory_style,
+                    ));
+                }
+                let filename = path
+                    .file_name()
+                    .expect("normalized paths can't end in `..`")
+                    .to_string_lossy();
+                spans.push(Span::raw(filename));
+                return Spans::from(spans).into();
+            }
+
+            // Tree view when not filtering
             let mut spans = Vec::with_capacity(item.depth + 3);
 
             // Build tree prefix for each ancestor level
@@ -435,6 +471,9 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         } else {
             Some((entry.path.as_path().into(), None))
         }
+    })
+    .with_filter_callback(move |is_filtering| {
+        is_filtering_for_callback.store(is_filtering, std::sync::atomic::Ordering::Relaxed);
     })
 }
 

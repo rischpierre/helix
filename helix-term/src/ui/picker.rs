@@ -268,6 +268,8 @@ pub struct Picker<T: 'static + Send + Sync, D: 'static> {
     /// An event handler for syntax highlighting the currently previewed file.
     preview_highlight_handler: Sender<Arc<Path>>,
     dynamic_query_handler: Option<Sender<DynamicQueryChange>>,
+    /// Callback to notify when filter state changes (empty vs non-empty query)
+    filter_state_callback: Option<Arc<dyn Fn(bool) + Send + Sync>>,
 }
 
 impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
@@ -389,6 +391,7 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
             file_fn: None,
             preview_highlight_handler: PreviewHighlightHandler::<T, D>::default().spawn(),
             dynamic_query_handler: None,
+            filter_state_callback: None,
         }
     }
 
@@ -437,6 +440,15 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
         };
         helix_event::send_blocking(&handler, event);
         self.dynamic_query_handler = Some(handler);
+        self
+    }
+
+    /// Set a callback to be notified when the filter state changes (empty vs non-empty query)
+    pub fn with_filter_callback(
+        mut self,
+        callback: impl Fn(bool) + Send + Sync + 'static,
+    ) -> Self {
+        self.filter_state_callback = Some(Arc::new(callback));
         self
     }
 
@@ -519,10 +531,20 @@ impl<T: 'static + Send + Sync, D: 'static + Send + Sync> Picker<T, D> {
     fn handle_prompt_change(&mut self, is_paste: bool) {
         // TODO: better track how the pattern has changed
         let line = self.prompt.line();
+        let was_filtering = !self.primary_query().is_empty();
         let old_query = self.query.parse(line);
         if self.query == old_query {
             return;
         }
+        let is_filtering = !self.primary_query().is_empty();
+
+        // Notify filter state callback if the state changed
+        if let Some(callback) = &self.filter_state_callback {
+            if is_filtering != was_filtering {
+                callback(is_filtering);
+            }
+        }
+
         // If the query has meaningfully changed, reset the cursor to the top of the results.
         self.cursor = 0;
         // Have nucleo reparse each changed column.
