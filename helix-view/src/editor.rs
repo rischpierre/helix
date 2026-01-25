@@ -888,7 +888,7 @@ where
     }
 }
 
-#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct AutoReload {
     /// Whether to check for file changes when the editor is focused. Defaults to false.
@@ -897,6 +897,23 @@ pub struct AutoReload {
     /// Autosave periodically at some interval. Defaults to disabled.
     #[serde(default)]
     pub periodic: AutoReloadPeriodic,
+    /// Whether to prompt before reloading. Defaults to true.
+    #[serde(default = "default_true")]
+    pub prompt: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for AutoReload {
+    fn default() -> Self {
+        Self {
+            focus_gained: false,
+            periodic: AutoReloadPeriodic::default(),
+            prompt: true,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize, Serialize)]

@@ -84,10 +84,11 @@ fn prompt_to_reload_if_needed(editor: &mut Editor, compositor: &mut Compositor) 
         .filter(has_document_been_externally_modified)
         .count();
 
+    let config = editor.config.load();
+
     // If there are no externally modified documents, we can do nothing.
     if modified_docs == 0 {
         // Reset the debounce timer to allow for the next check.
-        let config = editor.config.load();
         if config.auto_reload.periodic.enable {
             let interval = config.auto_reload.periodic.interval;
             send_blocking(
@@ -98,6 +99,25 @@ fn prompt_to_reload_if_needed(editor: &mut Editor, compositor: &mut Compositor) 
 
         return;
     }
+
+    // If prompt is disabled, reload directly without asking
+    if !config.auto_reload.prompt {
+        drop(config);
+        reload_modified_docs(editor);
+
+        // Reset the debounce timer to allow for the next check.
+        let config = editor.config.load();
+        if config.auto_reload.periodic.enable {
+            let interval = config.auto_reload.periodic.interval;
+            send_blocking(
+                &editor.handlers.auto_reload,
+                AutoReloadEvent::CheckForChanges { after: interval },
+            );
+        }
+        return;
+    }
+
+    drop(config);
 
     let prompt = Prompt::new(
         Cow::Borrowed("Some files have been modified externally, press Enter to reload them."),
@@ -130,6 +150,68 @@ fn prompt_to_reload_if_needed(editor: &mut Editor, compositor: &mut Compositor) 
     );
     // Show the prompt to the user.
     compositor.push(Box::new(prompt));
+}
+
+/// Reloads all documents that have been modified externally without prompting.
+fn reload_modified_docs(editor: &mut Editor) {
+    let scrolloff = editor.config().scrolloff;
+    let view_id = editor.tree.focus;
+
+    // Collect document IDs that need reloading
+    let docs_to_reload: Vec<_> = editor
+        .documents()
+        .filter(|doc| !doc.is_modified())
+        .filter(has_document_been_externally_modified)
+        .map(|doc| {
+            let view_ids: Vec<_> = doc.selections().keys().cloned().collect();
+            (doc.id(), view_ids)
+        })
+        .collect();
+
+    let mut reloaded = 0;
+    for (doc_id, view_ids) in docs_to_reload {
+        // Get the view to use for reload
+        let view_id_for_reload = view_ids.first().copied().unwrap_or(view_id);
+
+        // Sync view with document first
+        {
+            let doc = editor.documents.get_mut(&doc_id).unwrap();
+            let view = editor.tree.get_mut(view_id_for_reload);
+            view.sync_changes(doc);
+        }
+
+        // Perform the reload
+        let diff_providers = editor.diff_providers.clone();
+        let doc = editor.documents.get_mut(&doc_id).unwrap();
+        let view = editor.tree.get_mut(view_id_for_reload);
+
+        if let Err(error) = doc.reload(view, &diff_providers) {
+            editor.set_error(format!("{}", error));
+            continue;
+        }
+
+        if let Some(path) = doc.path() {
+            editor
+                .language_servers
+                .file_event_handler
+                .file_changed(path.clone());
+        }
+
+        reloaded += 1;
+
+        // Ensure cursor in view for all views showing this document
+        for vid in view_ids {
+            let doc = editor.documents.get_mut(&doc_id).unwrap();
+            let view = editor.tree.get_mut(vid);
+            if view.doc == doc_id {
+                view.ensure_cursor_in_view(doc, scrolloff);
+            }
+        }
+    }
+
+    if reloaded > 0 {
+        editor.set_status(format!("Reloaded {} modified document(s)", reloaded));
+    }
 }
 
 fn has_document_been_externally_modified(doc: &&Document) -> bool {
