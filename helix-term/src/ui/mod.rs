@@ -195,18 +195,23 @@ pub struct FilePickerData {
 #[derive(Clone, Debug)]
 pub struct TreeFileEntry {
     pub path: PathBuf,
-    /// Depth level in the tree (number of directory components)
+    /// Depth level in the tree (0 = root level)
     pub depth: usize,
     /// Whether this is the last item in its parent directory
     pub is_last: bool,
     /// For each ancestor level, whether there are more siblings after
     pub ancestors_have_next: Vec<bool>,
+    /// Whether this entry is a directory (vs a file)
+    pub is_dir: bool,
 }
 
 type FilePicker = Picker<TreeFileEntry, FilePickerData>;
 
-/// Build tree entries from a flat list of file paths with tree structure metadata
+/// Build tree entries from a flat list of file paths with tree structure metadata.
+/// This inserts directory entries as separate nodes so each entry only displays its name.
 fn build_tree_entries(mut files: Vec<PathBuf>, root: &Path) -> Vec<TreeFileEntry> {
+    use std::collections::HashSet;
+
     // Sort by relative path to group files by directory
     files.sort_by(|a, b| {
         let a_rel = a.strip_prefix(root).unwrap_or(a);
@@ -214,18 +219,52 @@ fn build_tree_entries(mut files: Vec<PathBuf>, root: &Path) -> Vec<TreeFileEntry
         a_rel.cmp(b_rel)
     });
 
-    let mut entries = Vec::with_capacity(files.len());
+    // First pass: collect all unique directory paths and file paths as (path, is_dir)
+    let mut all_paths: Vec<(PathBuf, bool)> = Vec::new();
+    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
 
-    for (i, path) in files.iter().enumerate() {
+    for file_path in &files {
+        let relative = file_path.strip_prefix(root).unwrap_or(file_path);
+
+        // Add all ancestor directories that we haven't seen yet
+        let mut ancestor = PathBuf::new();
+        for component in relative.parent().into_iter().flat_map(|p| p.components()) {
+            ancestor.push(component);
+            if seen_dirs.insert(ancestor.clone()) {
+                all_paths.push((root.join(&ancestor), true));
+            }
+        }
+
+        // Add the file itself
+        all_paths.push((file_path.clone(), false));
+    }
+
+    // Sort again to interleave directories with their contents
+    all_paths.sort_by(|a, b| {
+        let a_rel = a.0.strip_prefix(root).unwrap_or(&a.0);
+        let b_rel = b.0.strip_prefix(root).unwrap_or(&b.0);
+        // Directories come before files at the same level when they are prefixes
+        match a_rel.cmp(b_rel) {
+            std::cmp::Ordering::Equal => a.1.cmp(&b.1).reverse(), // dirs (true) before files (false)
+            other => other,
+        }
+    });
+
+    let mut entries = Vec::with_capacity(all_paths.len());
+
+    for (i, (path, is_dir)) in all_paths.iter().enumerate() {
         let relative = path.strip_prefix(root).unwrap_or(path);
         let depth = relative.components().count().saturating_sub(1);
         let parent = relative.parent().unwrap_or(Path::new(""));
 
-        // Check if this is the last file in its parent directory
-        let is_last = if i + 1 < files.len() {
-            let next_relative = files[i + 1].strip_prefix(root).unwrap_or(&files[i + 1]);
+        // Check if this is the last item in its parent directory
+        let is_last = if i + 1 < all_paths.len() {
+            let next_relative = all_paths[i + 1]
+                .0
+                .strip_prefix(root)
+                .unwrap_or(&all_paths[i + 1].0);
             let next_parent = next_relative.parent().unwrap_or(Path::new(""));
-            // Last if next file is in a different directory or shallower depth
+            // Last if next item is in a different directory
             next_parent != parent
         } else {
             true
@@ -237,20 +276,14 @@ fn build_tree_entries(mut files: Vec<PathBuf>, root: &Path) -> Vec<TreeFileEntry
             // Get ancestor path at depth d
             let ancestor: PathBuf = relative.components().take(d + 1).collect();
 
-            // Check if any following file shares this ancestor but has different next component
-            let has_more = files[i + 1..].iter().any(|other| {
+            // Check if any following item shares this ancestor
+            let has_more = all_paths[i + 1..].iter().any(|(other, _)| {
                 let other_rel = other.strip_prefix(root).unwrap_or(other);
                 if other_rel.components().count() <= d {
                     return false;
                 }
                 let other_ancestor: PathBuf = other_rel.components().take(d + 1).collect();
-                // Same ancestor at level d means there's more at this level
-                other_ancestor == ancestor && {
-                    // But only if it's a sibling (same parent at level d+1 or different subtree)
-                    let parent_at_d: PathBuf = relative.components().take(d + 1).collect();
-                    let other_parent_at_d: PathBuf = other_rel.components().take(d + 1).collect();
-                    parent_at_d == other_parent_at_d
-                }
+                other_ancestor == ancestor
             });
             ancestors_have_next.push(has_more);
         }
@@ -260,6 +293,7 @@ fn build_tree_entries(mut files: Vec<PathBuf>, root: &Path) -> Vec<TreeFileEntry
             depth,
             is_last,
             ancestors_have_next,
+            is_dir: *is_dir,
         });
     }
 
@@ -358,19 +392,17 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
                 ));
             }
 
-            // Show directory path styled, then filename
-            if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-                spans.push(Span::styled(
-                    format!("{}/", parent.to_string_lossy()),
-                    data.directory_style,
-                ));
-            }
-
-            let filename = path
+            // Show only the name (last component), with "/" suffix for directories
+            let name = path
                 .file_name()
                 .expect("normalized paths can't end in `..`")
                 .to_string_lossy();
-            spans.push(Span::raw(filename));
+
+            if item.is_dir {
+                spans.push(Span::styled(format!("{}/", name), data.directory_style));
+            } else {
+                spans.push(Span::raw(name));
+            }
 
             Spans::from(spans).into()
         },
@@ -382,6 +414,10 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
         tree_entries,
         data,
         move |cx, entry: &TreeFileEntry, action| {
+            // Don't try to open directories
+            if entry.is_dir {
+                return;
+            }
             if let Err(e) = cx.editor.open(&entry.path, action) {
                 let err = if let Some(err) = e.source() {
                     format!("{}", err)
@@ -392,7 +428,14 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
             }
         },
     )
-    .with_preview(|_editor, entry| Some((entry.path.as_path().into(), None)))
+    .with_preview(|_editor, entry| {
+        // Only show preview for files, not directories
+        if entry.is_dir {
+            None
+        } else {
+            Some((entry.path.as_path().into(), None))
+        }
+    })
 }
 
 type FileExplorer = Picker<(PathBuf, bool), (PathBuf, Style)>;
