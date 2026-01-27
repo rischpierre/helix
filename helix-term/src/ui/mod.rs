@@ -408,9 +408,9 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
             for &has_next in &item.ancestors_have_next {
                 if has_next {
                     spans.push(Span::styled(line::VERTICAL, data.directory_style));
-                    spans.push(Span::raw("   "));
+                    spans.push(Span::raw(" "));
                 } else {
-                    spans.push(Span::raw("    "));
+                    spans.push(Span::raw("  "));
                 }
             }
 
@@ -422,10 +422,7 @@ pub fn file_picker(editor: &Editor, root: PathBuf) -> FilePicker {
                     line::VERTICAL_RIGHT
                 };
                 spans.push(Span::styled(branch, data.directory_style));
-                spans.push(Span::styled(
-                    format!("{}{} ", line::HORIZONTAL, line::HORIZONTAL),
-                    data.directory_style,
-                ));
+                spans.push(Span::styled(line::HORIZONTAL, data.directory_style));
             }
 
             // Show only the name (last component), with "/" suffix for directories
