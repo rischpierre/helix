@@ -231,6 +231,9 @@ fn diag_picker(
         }
     }
 
+    // Sort by severity: ERROR (1) first, then WARNING (2), INFO (3), HINT (4)
+    flat_diag.sort_by(|a, b| a.diag.severity.cmp(&b.diag.severity));
+
     let styles = DiagnosticStyles {
         hint: cx.editor.theme.get("hint"),
         info: cx.editor.theme.get("info"),
