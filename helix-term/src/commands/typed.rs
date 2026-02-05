@@ -2434,30 +2434,123 @@ fn run_shell_command_to_buffer(
     let lang = args.get_flag("lang").map(|s| s.to_string());
     let cmd = args.join(" ");
 
-    let callback = async move {
-        let output = shell_impl_async(&shell, &cmd, None).await?;
-        let call: job::Callback = Callback::EditorCompositor(Box::new(
-            move |editor: &mut Editor, _compositor: &mut Compositor| {
-                let text = helix_core::Rope::from(output.as_ref());
-                let mut doc = Document::from(
-                    text,
-                    None,
-                    editor.config.clone(),
-                    editor.syn_loader.clone(),
-                );
-                if let Some(lang) = &lang {
-                    let loader = editor.syn_loader.load();
-                    if let Err(err) = doc.set_language_by_language_id(lang, &loader) {
-                        editor.set_error(format!("{}", err));
+    // Create the buffer immediately so output streams into it
+    let mut doc = Document::default(cx.editor.config.clone(), cx.editor.syn_loader.clone());
+    if let Some(lang) = &lang {
+        let loader = cx.editor.syn_loader.load();
+        if let Err(err) = doc.set_language_by_language_id(lang, &loader) {
+            cx.editor.set_error(format!("{}", err));
+        }
+    }
+    let doc_id = cx.editor.new_file_from_document(Action::Replace, doc);
+
+    // Spawn background job to stream output
+    cx.jobs.spawn(async move {
+        use std::process::Stdio;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::process::Command;
+
+        ensure!(!shell.is_empty(), "No shell set");
+
+        let mut process = Command::new(&shell[0]);
+        process
+            .args(&shell[1..])
+            .arg(&cmd)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null());
+
+        let mut child = process.spawn()?;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        let mut stdout_reader = stdout.map(|s| BufReader::new(s).lines());
+        let mut stderr_reader = stderr.map(|s| BufReader::new(s).lines());
+        let mut stdout_done = stdout_reader.is_none();
+        let mut stderr_done = stderr_reader.is_none();
+
+        // Stream stdout and stderr concurrently
+        while !stdout_done || !stderr_done {
+            tokio::select! {
+                line = async {
+                    match stdout_reader.as_mut() {
+                        Some(r) => r.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !stdout_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            let line = line + "\n";
+                            job::dispatch(move |editor, _compositor| {
+                                let view_id = editor.tree.focus;
+                                if let Some(doc) = editor.document_mut(doc_id) {
+                                    let text = doc.text();
+                                    let end = text.len_chars();
+                                    let transaction = Transaction::insert(
+                                        text,
+                                        &Selection::point(end),
+                                        line.into(),
+                                    );
+                                    doc.apply(&transaction, view_id);
+                                }
+                            })
+                            .await;
+                        }
+                        Ok(None) => stdout_done = true,
+                        Err(_) => stdout_done = true,
                     }
                 }
-                editor.new_file_from_document(Action::Replace, doc);
-                editor.set_status("Command output opened in buffer");
-            },
-        ));
-        Ok(call)
-    };
-    cx.jobs.callback(callback);
+                line = async {
+                    match stderr_reader.as_mut() {
+                        Some(r) => r.next_line().await,
+                        None => std::future::pending().await,
+                    }
+                }, if !stderr_done => {
+                    match line {
+                        Ok(Some(line)) => {
+                            let line = line + "\n";
+                            job::dispatch(move |editor, _compositor| {
+                                let view_id = editor.tree.focus;
+                                if let Some(doc) = editor.document_mut(doc_id) {
+                                    let text = doc.text();
+                                    let end = text.len_chars();
+                                    let transaction = Transaction::insert(
+                                        text,
+                                        &Selection::point(end),
+                                        line.into(),
+                                    );
+                                    doc.apply(&transaction, view_id);
+                                }
+                            })
+                            .await;
+                        }
+                        Ok(None) => stderr_done = true,
+                        Err(_) => stderr_done = true,
+                    }
+                }
+            }
+        }
+
+        let status = child.wait().await?;
+        let exit_msg = format!("\n[Process exited with status: {}]", status);
+        job::dispatch(move |editor, _compositor| {
+            let view_id = editor.tree.focus;
+            if let Some(doc) = editor.document_mut(doc_id) {
+                let text = doc.text();
+                let end = text.len_chars();
+                let transaction = Transaction::insert(
+                    text,
+                    &Selection::point(end),
+                    exit_msg.into(),
+                );
+                doc.apply(&transaction, view_id);
+            }
+            editor.set_status("Command completed");
+        })
+        .await;
+
+        Ok(())
+    });
 
     Ok(())
 }
