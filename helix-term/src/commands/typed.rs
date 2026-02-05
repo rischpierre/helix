@@ -2421,6 +2421,47 @@ fn run_shell_command(
     Ok(())
 }
 
+fn run_shell_command_to_buffer(
+    cx: &mut compositor::Context,
+    args: Args,
+    event: PromptEvent,
+) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let shell = cx.editor.config().shell.clone();
+    let lang = args.get_flag("lang").map(|s| s.to_string());
+    let cmd = args.join(" ");
+
+    let callback = async move {
+        let output = shell_impl_async(&shell, &cmd, None).await?;
+        let call: job::Callback = Callback::EditorCompositor(Box::new(
+            move |editor: &mut Editor, _compositor: &mut Compositor| {
+                let text = helix_core::Rope::from(output.as_ref());
+                let mut doc = Document::from(
+                    text,
+                    None,
+                    editor.config.clone(),
+                    editor.syn_loader.clone(),
+                );
+                if let Some(lang) = &lang {
+                    let loader = editor.syn_loader.load();
+                    if let Err(err) = doc.set_language_by_language_id(lang, &loader) {
+                        editor.set_error(format!("{}", err));
+                    }
+                }
+                editor.new_file_from_document(Action::Replace, doc);
+                editor.set_status("Command output opened in buffer");
+            },
+        ));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
+
+    Ok(())
+}
+
 fn reset_diff_change(
     cx: &mut compositor::Context,
     _args: Args,
@@ -2668,6 +2709,23 @@ const SHELL_COMPLETER: CommandCompleter = CommandCompleter::positional(&[
     // Shell argument(s)
     completers::repeating_filenames,
 ]);
+
+/// Shell command with optional --lang flag for syntax highlighting.
+const SHELL_TO_BUFFER_SIGNATURE: Signature = Signature {
+    positionals: (1, Some(2)),
+    raw_after: Some(1),
+    flags: &[Flag {
+        name: "lang",
+        alias: Some('l'),
+        doc: "language for syntax highlighting (e.g., rust, python, json)",
+        completions: Some(&[
+            "rust", "python", "javascript", "typescript", "json", "toml", "yaml",
+            "markdown", "bash", "c", "cpp", "go", "java", "ruby", "lua", "zig",
+        ]),
+        ..Flag::DEFAULT
+    }],
+    ..Signature::DEFAULT
+};
 
 const WRITE_NO_FORMAT_FLAG: Flag = Flag {
     name: "no-format",
@@ -3576,6 +3634,14 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         fun: run_shell_command,
         completer: SHELL_COMPLETER,
         signature: SHELL_SIGNATURE,
+    },
+    TypableCommand {
+        name: "run-shell-command-to-buffer",
+        aliases: &["shb"],
+        doc: "Run a shell command and open output in a new buffer. Use --lang (-l) for syntax highlighting.",
+        fun: run_shell_command_to_buffer,
+        completer: SHELL_COMPLETER,
+        signature: SHELL_TO_BUFFER_SIGNATURE,
     },
     TypableCommand {
         name: "reset-diff-change",
