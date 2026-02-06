@@ -3646,7 +3646,7 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
     },
     TypableCommand {
         name: "config-reload",
-        aliases: &[],
+        aliases: &["cr"],
         doc: "Refresh user config.",
         fun: refresh_config,
         completer: CommandCompleter::none(),
