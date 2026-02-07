@@ -753,6 +753,7 @@ impl EditorView {
             .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
 
         let mut x = viewport.x;
+        let mut y = viewport.y;
         let current_doc = view!(editor).doc;
 
         for doc in editor.documents() {
@@ -771,15 +772,31 @@ impl EditorView {
             };
 
             let text = format!(" {}{} ", fname, if doc.is_modified() { "[+]" } else { "" });
-            let used_width = viewport.x.saturating_sub(x);
-            let rem_width = surface.area.width.saturating_sub(used_width);
+            let text_width = text.len() as u16;
+
+            // Wrap to next line if this tab would overflow
+            if x + text_width > surface.area.right() && x > viewport.x {
+                y += 1;
+                x = viewport.x;
+                if y >= viewport.y + viewport.height {
+                    break;
+                }
+            }
+
+            let used_width = x.saturating_sub(viewport.x);
+            let rem_width = viewport.width.saturating_sub(used_width);
 
             x = surface
-                .set_stringn(x, viewport.y, text, rem_width as usize, style)
+                .set_stringn(x, y, text, rem_width as usize, style)
                 .0;
 
             if x >= surface.area.right() {
-                break;
+                // Move to next line after filling current line completely
+                y += 1;
+                x = viewport.x;
+                if y >= viewport.y + viewport.height {
+                    break;
+                }
             }
         }
     }
@@ -1682,10 +1699,16 @@ impl Component for EditorView {
 
         let use_breadcrumb = config.breadcrumb;
 
-        // -1 for commandline and -1 for bufferline and -1 for breadcrumb
+        let buffer_lines = if use_bufferline {
+            (config.buffer_lines as u16).max(1)
+        } else {
+            0
+        };
+
+        // -1 for commandline and -N for bufferline and -1 for breadcrumb
         let mut editor_area = area.clip_bottom(1);
         if use_bufferline {
-            editor_area = editor_area.clip_top(1);
+            editor_area = editor_area.clip_top(buffer_lines);
         }
         if use_breadcrumb {
             editor_area = editor_area.clip_top(1);
@@ -1696,8 +1719,8 @@ impl Component for EditorView {
 
         let mut top_lines = 0u16;
         if use_bufferline {
-            Self::render_bufferline(cx.editor, area.with_height(1), surface);
-            top_lines += 1;
+            Self::render_bufferline(cx.editor, area.with_height(buffer_lines), surface);
+            top_lines += buffer_lines;
         }
 
         if use_breadcrumb {
