@@ -339,6 +339,11 @@ pub struct Config {
     pub whitespace: WhitespaceConfig,
     /// Persistently display open buffers along the top
     pub bufferline: BufferLine,
+    /// Display a breadcrumb line showing cursor position in the syntax tree
+    pub breadcrumb: bool,
+    /// Max length of each breadcrumb segment before middle-truncation. Defaults to 20.
+    #[serde(default = "default_breadcrumb_max_len")]
+    pub breadcrumb_max_len: usize,
     /// Vertical indent width guides.
     pub indent_guides: IndentGuidesConfig,
     /// Whether to color modes with different colors. Defaults to `false`.
@@ -906,6 +911,10 @@ fn default_true() -> bool {
     true
 }
 
+fn default_breadcrumb_max_len() -> usize {
+    20
+}
+
 impl Default for AutoReload {
     fn default() -> Self {
         Self {
@@ -1081,6 +1090,8 @@ impl Default for Config {
             rulers: Vec::new(),
             whitespace: WhitespaceConfig::default(),
             bufferline: BufferLine::default(),
+            breadcrumb: false,
+            breadcrumb_max_len: default_breadcrumb_max_len(),
             indent_guides: IndentGuidesConfig::default(),
             color_modes: false,
             soft_wrap: SoftWrap {

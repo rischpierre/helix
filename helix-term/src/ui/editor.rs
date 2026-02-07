@@ -558,6 +558,179 @@ impl EditorView {
         Some(OverlayHighlights::Homogeneous { highlight, ranges })
     }
 
+    /// Render breadcrumb line showing the cursor's position in the syntax tree
+    pub fn render_breadcrumb(editor: &Editor, viewport: Rect, surface: &mut Surface) {
+        let style = editor
+            .theme
+            .try_get("ui.bufferline.background")
+            .unwrap_or_else(|| editor.theme.get("ui.statusline"));
+
+        surface.clear_with(viewport, style);
+
+        let text_style = editor
+            .theme
+            .try_get("ui.bufferline")
+            .unwrap_or_else(|| editor.theme.get("ui.statusline.inactive"));
+
+        let view = view!(editor);
+        let doc = match editor.document(view.doc) {
+            Some(doc) => doc,
+            None => return,
+        };
+
+        let syntax = match doc.syntax() {
+            Some(syntax) => syntax,
+            None => return,
+        };
+
+        let text = doc.text().slice(..);
+        let cursor_pos = doc.selection(view.id).primary().cursor(text);
+        let byte_pos = text.char_to_byte(cursor_pos) as u32;
+
+        let mut node = match syntax.named_descendant_for_byte_range(byte_pos, byte_pos) {
+            Some(node) => node,
+            None => return,
+        };
+
+        // Only show scope-creating nodes (functions, classes, control flow, blocks)
+        fn is_scope_node(kind: &str) -> bool {
+            matches!(
+                kind,
+                // Functions / methods
+                "function_item" | "function_definition" | "function_declaration"
+                | "method_definition" | "method_declaration" | "arrow_function"
+                | "closure_expression" | "lambda" | "lambda_expression"
+                // Classes / structs / traits / impls
+                | "class_definition" | "class_declaration" | "class_specifier"
+                | "struct_item" | "struct_specifier" | "enum_item" | "enum_definition"
+                | "impl_item" | "trait_item" | "interface_declaration"
+                | "mod_item" | "namespace_definition"
+                // Control flow
+                | "if_statement" | "if_expression" | "if_let_expression"
+                | "else_clause" | "elif_clause"
+                | "for_statement" | "for_expression" | "for_in_statement"
+                | "while_statement" | "while_expression" | "while_let_expression"
+                | "loop_expression"
+                | "match_expression" | "match_arm" | "switch_statement" | "case_statement"
+                | "try_statement" | "try_expression" | "catch_clause" | "except_clause"
+                | "with_statement"
+                // Blocks
+                | "block"
+            )
+        }
+
+        fn is_function_node(kind: &str) -> bool {
+            matches!(
+                kind,
+                "function_item" | "function_definition" | "function_declaration"
+                | "method_definition" | "method_declaration" | "arrow_function"
+                | "closure_expression" | "lambda" | "lambda_expression"
+            )
+        }
+
+        // Collect scope-creating ancestor node info from root to cursor
+        // (start_byte, end_byte, is_function)
+        let mut ancestors: Vec<(usize, usize, bool)> = Vec::new();
+        if node.is_named() && is_scope_node(node.kind()) {
+            ancestors.push((node.start_byte() as usize, node.end_byte() as usize, is_function_node(node.kind())));
+        }
+        while let Some(parent) = node.parent() {
+            if parent.is_named() && parent.parent().is_some() && is_scope_node(parent.kind()) {
+                ancestors.push((parent.start_byte() as usize, parent.end_byte() as usize, is_function_node(parent.kind())));
+            }
+            node = parent;
+        }
+        ancestors.reverse();
+
+        let separator_style = Style::default().fg(Color::Rgb(100, 50, 150));
+        let dots_style = Style::default().fg(Color::Black);
+
+        // Build breadcrumb parts: for each node, take the first line of its text
+        let source = text.slice(..);
+        let mut parts = Vec::new();
+        for (start, end, is_fn) in &ancestors {
+            let start_char = text.byte_to_char(*start);
+            let end_char = text.byte_to_char((*end).min(text.len_bytes()));
+            let node_text: String = source.slice(start_char..end_char).into();
+            // Take only the first line and trim it, strip trailing colons/braces
+            let mut display = node_text
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_end_matches(|c| c == ':' || c == '{' || c == '(')
+                .trim()
+                .to_string();
+            // For functions, strip everything from the first '(' onwards
+            if *is_fn {
+                if let Some(paren_pos) = display.find('(') {
+                    display.truncate(paren_pos);
+                }
+            }
+            if !display.is_empty() {
+                parts.push(display);
+            }
+        }
+
+        // Draw each part with separators, truncating in the middle at 20 chars
+        let max_len = editor.config().breadcrumb_max_len;
+        let mut x = viewport.x + 1;
+        let x_max = viewport.x + viewport.width;
+
+        for (i, part) in parts.iter().enumerate() {
+            if x >= x_max {
+                break;
+            }
+
+            // Draw separator before all but first part
+            if i > 0 {
+                let rem = (x_max - x) as usize;
+                if rem == 0 {
+                    break;
+                }
+                x = surface.set_stringn(x, viewport.y, ">", rem, separator_style).0;
+                if x >= x_max {
+                    break;
+                }
+            }
+
+            let rem = (x_max - x) as usize;
+            if rem == 0 {
+                break;
+            }
+
+            if part.len() > max_len {
+                // Middle-truncate: show start..end
+                let dots = "..";
+                let avail = max_len - dots.len(); // 18 chars for content
+                let head = avail / 2;
+                let tail = avail - head;
+                let head_str = &part[..head];
+                let tail_str = &part[part.len() - tail..];
+
+                x = surface
+                    .set_stringn(x, viewport.y, head_str, rem, text_style)
+                    .0;
+                if x < x_max {
+                    let rem = (x_max - x) as usize;
+                    x = surface
+                        .set_stringn(x, viewport.y, dots, rem, dots_style)
+                        .0;
+                }
+                if x < x_max {
+                    let rem = (x_max - x) as usize;
+                    x = surface
+                        .set_stringn(x, viewport.y, tail_str, rem, text_style)
+                        .0;
+                }
+            } else {
+                x = surface
+                    .set_stringn(x, viewport.y, part, rem, text_style)
+                    .0;
+            }
+        }
+    }
+
     /// Render bufferline at the top
     pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
         let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
@@ -1507,17 +1680,29 @@ impl Component for EditorView {
             _ => false,
         };
 
-        // -1 for commandline and -1 for bufferline
+        let use_breadcrumb = config.breadcrumb;
+
+        // -1 for commandline and -1 for bufferline and -1 for breadcrumb
         let mut editor_area = area.clip_bottom(1);
         if use_bufferline {
+            editor_area = editor_area.clip_top(1);
+        }
+        if use_breadcrumb {
             editor_area = editor_area.clip_top(1);
         }
 
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
 
+        let mut top_lines = 0u16;
         if use_bufferline {
             Self::render_bufferline(cx.editor, area.with_height(1), surface);
+            top_lines += 1;
+        }
+
+        if use_breadcrumb {
+            let breadcrumb_area = Rect::new(area.x, area.y + top_lines, area.width, 1);
+            Self::render_breadcrumb(cx.editor, breadcrumb_area, surface);
         }
 
         for (view, is_focused) in cx.editor.tree.views() {
