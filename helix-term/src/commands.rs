@@ -484,6 +484,7 @@ impl MappableCommand {
         yank_joined_to_clipboard, "Join and yank selections to clipboard",
         yank_main_selection_to_clipboard, "Yank main selection to clipboard",
         yank_joined_to_primary_clipboard, "Join and yank selections to primary clipboard",
+        yank_diagnostic_with_location, "Yank diagnostic with file path and line to clipboard",
         yank_main_selection_to_primary_clipboard, "Yank main selection to primary clipboard",
         replace_with_yanked, "Replace with yanked text",
         replace_selections_with_clipboard, "Replace selections by clipboard content",
@@ -4595,6 +4596,42 @@ fn yank_joined_to_primary_clipboard(cx: &mut Context) {
     let line_ending = doc!(cx.editor).line_ending;
     yank_joined_impl(cx.editor, line_ending.as_str(), '*');
     exit_select_mode(cx);
+}
+
+fn yank_diagnostic_with_location(cx: &mut Context) {
+    let (view, doc) = current_ref!(cx.editor);
+    let text = doc.text().slice(..);
+    let primary = doc.selection(view.id).primary();
+
+    let diags: Vec<_> = doc
+        .diagnostics()
+        .iter()
+        .filter(|d| primary.overlaps(&helix_core::Range::new(d.range.start, d.range.end)))
+        .collect();
+
+    if diags.is_empty() {
+        cx.editor.set_error("No diagnostics under primary selection");
+        return;
+    }
+
+    let path = doc.display_name();
+
+    let values: Vec<String> = diags
+        .iter()
+        .map(|d| {
+            let line = text.char_to_line(d.range.start) + 1;
+            format!("{path}:{line}: {}", d.message)
+        })
+        .collect();
+
+    let n = values.len();
+    match cx.editor.registers.write('+', values) {
+        Ok(_) => cx.editor.set_status(format!(
+            "Yanked {n} diagnostic{} with location to clipboard",
+            if n == 1 { "" } else { "s" }
+        )),
+        Err(err) => cx.editor.set_error(err.to_string()),
+    }
 }
 
 fn yank_primary_selection_impl(editor: &mut Editor, register: char) {

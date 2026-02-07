@@ -231,6 +231,7 @@ pub fn default() -> HashMap<Mode, KeyTrie> {
             "S" => workspace_symbol_picker,
             "d" => diagnostics_picker,
             "D" => workspace_diagnostics_picker,
+            "Q" => yank_diagnostic_with_location,
             "g" => changed_file_picker,
             "a" => code_action,
             "'" => last_picker,
