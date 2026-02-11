@@ -732,6 +732,45 @@ impl EditorView {
     }
 
     /// Render bufferline at the top
+    /// Compute how many lines the bufferline needs to display all tabs.
+    fn compute_buffer_lines(editor: &Editor, width: u16) -> u16 {
+        let scratch = PathBuf::from(SCRATCH_BUFFER_NAME);
+        let mut x: u16 = 0;
+        let mut lines: u16 = 1;
+
+        for doc in editor.documents() {
+            let fname = doc
+                .path()
+                .unwrap_or(&scratch)
+                .file_name()
+                .unwrap_or_default()
+                .to_str()
+                .unwrap_or_default();
+
+            let text_width =
+                (fname.len() + if doc.is_modified() { 5 } else { 2 }) as u16;
+
+            if x + text_width > width && x > 0 {
+                lines += 1;
+                x = text_width;
+            } else {
+                x += text_width;
+            }
+
+            if x >= width {
+                lines += 1;
+                x = 0;
+            }
+        }
+
+        // If x is 0 after the loop and we counted an extra line, adjust
+        if x == 0 && lines > 1 {
+            lines -= 1;
+        }
+
+        lines
+    }
+
     pub fn render_bufferline(editor: &Editor, viewport: Rect, surface: &mut Surface) {
         let scratch = PathBuf::from(SCRATCH_BUFFER_NAME); // default filename to use for scratch buffer
         surface.clear_with(
@@ -1700,7 +1739,8 @@ impl Component for EditorView {
         let use_breadcrumb = config.breadcrumb;
 
         let buffer_lines = if use_bufferline {
-            (config.buffer_lines as u16).max(1)
+            let needed = Self::compute_buffer_lines(cx.editor, area.width);
+            needed.min(config.buffer_lines_max as u16).max(1)
         } else {
             0
         };

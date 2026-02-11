@@ -339,9 +339,12 @@ pub struct Config {
     pub whitespace: WhitespaceConfig,
     /// Persistently display open buffers along the top
     pub bufferline: BufferLine,
-    /// Number of lines to use for the bufferline. Defaults to 1.
-    #[serde(default = "default_buffer_lines")]
-    pub buffer_lines: usize,
+    /// Maximum number of lines to use for the bufferline. Defaults to 1.
+    #[serde(
+        default = "default_buffer_lines_max",
+        alias = "buffer-lines"
+    )]
+    pub buffer_lines_max: usize,
     /// Display a breadcrumb line showing cursor position in the syntax tree
     pub breadcrumb: bool,
     /// Max length of each breadcrumb segment before middle-truncation. Defaults to 20.
@@ -918,7 +921,7 @@ fn default_breadcrumb_max_len() -> usize {
     20
 }
 
-fn default_buffer_lines() -> usize {
+fn default_buffer_lines_max() -> usize {
     1
 }
 
@@ -1097,7 +1100,7 @@ impl Default for Config {
             rulers: Vec::new(),
             whitespace: WhitespaceConfig::default(),
             bufferline: BufferLine::default(),
-            buffer_lines: 1,
+            buffer_lines_max: 1,
             breadcrumb: false,
             breadcrumb_max_len: default_breadcrumb_max_len(),
             indent_guides: IndentGuidesConfig::default(),
