@@ -4,7 +4,7 @@ use helix_core::syntax::config::LanguageServerFeature;
 
 use crate::{
     editor::GutterType,
-    graphics::{Style, UnderlineStyle},
+    graphics::{Color, Style, UnderlineStyle},
     Document, Editor, Theme, View,
 };
 
@@ -32,6 +32,8 @@ impl GutterType {
             GutterType::LineNumbers => line_numbers(editor, doc, view, theme, is_focused),
             GutterType::Spacer => padding(editor, doc, view, theme, is_focused),
             GutterType::Diff => diff(editor, doc, view, theme, is_focused),
+            #[cfg(feature = "git")]
+            GutterType::Blame => blame(editor, doc, view, theme, is_focused),
         }
     }
 
@@ -41,6 +43,8 @@ impl GutterType {
             GutterType::LineNumbers => line_numbers_width(view, doc),
             GutterType::Spacer => 1,
             GutterType::Diff => 1,
+            #[cfg(feature = "git")]
+            GutterType::Blame => BLAME_GUTTER_WIDTH,
         }
     }
 }
@@ -271,6 +275,32 @@ pub fn breakpoints<'doc>(
     )
 }
 
+#[cfg(feature = "git")]
+const BLAME_GUTTER_WIDTH: usize = 28;
+
+#[cfg(feature = "git")]
+fn calculate_blame_color(timestamp: i64, min_timestamp: i64, max_timestamp: i64) -> Color {
+    // Light blue: RGB(173, 216, 230) - #ADD8E6
+    // Dark blue: RGB(0, 0, 139) - #00008B
+
+    let light_blue = (173u8, 216u8, 230u8);
+    let dark_blue = (0u8, 0u8, 139u8);
+
+    // Calculate recency: 0.0 = oldest, 1.0 = newest
+    let recency = if max_timestamp == min_timestamp {
+        1.0
+    } else {
+        (timestamp - min_timestamp) as f32 / (max_timestamp - min_timestamp) as f32
+    };
+
+    // Interpolate between light blue (old) and dark blue (new)
+    let r = light_blue.0 as f32 + (dark_blue.0 as f32 - light_blue.0 as f32) * recency;
+    let g = light_blue.1 as f32 + (dark_blue.1 as f32 - light_blue.1 as f32) * recency;
+    let b = light_blue.2 as f32 + (dark_blue.2 as f32 - light_blue.2 as f32) * recency;
+
+    Color::Rgb(r as u8, g as u8, b as u8)
+}
+
 fn execution_pause_indicator<'doc>(
     editor: &'doc Editor,
     doc: &'doc Document,
@@ -304,6 +334,45 @@ fn execution_pause_indicator<'doc>(
             Some(style)
         },
     )
+}
+
+#[cfg(feature = "git")]
+pub fn blame<'doc>(
+    _editor: &'doc Editor,
+    doc: &'doc Document,
+    _view: &View,
+    _theme: &Theme,
+    _is_focused: bool,
+) -> GutterFn<'doc> {
+    let blame_data = doc.blame().cloned();
+
+    // Calculate min and max timestamps for color gradient
+    let (min_timestamp, max_timestamp) = blame_data
+        .as_ref()
+        .map(|data| {
+            let timestamps: Vec<i64> = data.iter().map(|b| b.timestamp).collect();
+            let min = timestamps.iter().min().copied().unwrap_or(0);
+            let max = timestamps.iter().max().copied().unwrap_or(0);
+            (min, max)
+        })
+        .unwrap_or((0, 0));
+
+    Box::new(move |line: usize, _selected: bool, first_visual_line: bool, out: &mut String| {
+        if !first_visual_line {
+            return None;
+        }
+        let data = blame_data.as_ref()?;
+        let entry = data.get(line)?;
+        write!(out, "{:<16.16} {}", entry.author, entry.date).ok();
+
+        // Calculate color based on commit recency
+        let color = calculate_blame_color(entry.timestamp, min_timestamp, max_timestamp);
+        let style = Style {
+            fg: Some(color),
+            ..Style::new()
+        };
+        Some(style)
+    })
 }
 
 pub fn diagnostics_or_breakpoints<'doc>(

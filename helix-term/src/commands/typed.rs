@@ -12,7 +12,7 @@ use helix_core::indent::MAX_INDENT;
 use helix_core::line_ending;
 use helix_stdx::path::home_dir;
 use helix_view::document::{read_to_string, DEFAULT_LANGUAGE_NAME};
-use helix_view::editor::{CloseError, ConfigEvent};
+use helix_view::editor::{CloseError, ConfigEvent, GutterType};
 use helix_view::expansion;
 use serde_json::Value;
 use ui::completers::{self, Completer};
@@ -2876,6 +2876,61 @@ fn echo(cx: &mut compositor::Context, args: Args, event: PromptEvent) -> anyhow:
     Ok(())
 }
 
+#[cfg(feature = "git")]
+fn blame(cx: &mut compositor::Context, _args: Args, event: PromptEvent) -> anyhow::Result<()> {
+    if event != PromptEvent::Validate {
+        return Ok(());
+    }
+
+    let (view, doc) = current!(cx.editor);
+    let already_showing = view.gutters.layout.contains(&GutterType::Blame);
+
+    if already_showing {
+        // Toggle off
+        view.gutters.layout.retain(|g| *g != GutterType::Blame);
+        doc.clear_blame();
+        return Ok(());
+    }
+
+    // Toggle on - insert before LineNumbers
+    let insert_pos = view
+        .gutters
+        .layout
+        .iter()
+        .position(|g| *g == GutterType::LineNumbers)
+        .unwrap_or(0);
+    view.gutters.layout.insert(insert_pos, GutterType::Spacer);
+    view.gutters.layout.insert(insert_pos, GutterType::Blame);
+
+    // If blame data already loaded, done
+    if doc.blame().is_some() {
+        return Ok(());
+    }
+
+    let path = doc
+        .path()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("buffer has no path"))?;
+    let doc_id = doc.id();
+
+    let callback = async move {
+        let blame_data = helix_vcs::get_blame(&path)
+            .map_err(|e| anyhow::anyhow!("git blame failed: {}", e))?;
+        let call: crate::job::Callback = crate::job::Callback::Editor(Box::new(move |editor| {
+            let doc = doc_mut!(editor, &doc_id);
+            doc.set_blame(blame_data);
+        }));
+        Ok(call)
+    };
+    cx.jobs.callback(callback);
+    Ok(())
+}
+
+#[cfg(not(feature = "git"))]
+fn blame(_cx: &mut compositor::Context, _args: Args, _event: PromptEvent) -> anyhow::Result<()> {
+    bail!("git support not compiled in")
+}
+
 fn noop(_cx: &mut compositor::Context, _args: Args, _event: PromptEvent) -> anyhow::Result<()> {
     Ok(())
 }
@@ -2963,6 +3018,16 @@ pub const TYPABLE_COMMAND_LIST: &[TypableCommand] = &[
         completer: CommandCompleter::all(completers::filename),
         signature: Signature {
             positionals: (1, None),
+            ..Signature::DEFAULT
+        },
+    },
+    TypableCommand {
+        name: "blame",
+        aliases: &[],
+        doc: "Toggle git blame in the gutter (author and date per line).",
+        fun: blame,
+        completer: CommandCompleter::none(),
+        signature: Signature {
             ..Signature::DEFAULT
         },
     },

@@ -16,6 +16,8 @@ use helix_event::TaskController;
 use helix_lsp::util::lsp_pos_to_pos;
 use helix_stdx::faccess::{copy_metadata, readonly};
 use helix_vcs::{DiffHandle, DiffProviderRegistry};
+#[cfg(feature = "git")]
+use helix_vcs::BlameLine;
 use once_cell::sync::OnceCell;
 use thiserror;
 
@@ -198,6 +200,9 @@ pub struct Document {
 
     diff_handle: Option<DiffHandle>,
     version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
+
+    #[cfg(feature = "git")]
+    blame: Option<Arc<Vec<BlameLine>>>,
 
     // when document was used for most-recent-used buffer picker
     pub focused_at: std::time::Instant,
@@ -722,6 +727,8 @@ impl Document {
             diff_handle: None,
             config,
             version_control_head: None,
+            #[cfg(feature = "git")]
+            blame: None,
             focused_at: std::time::Instant::now(),
             readonly: false,
             jump_labels: HashMap::new(),
@@ -1888,6 +1895,21 @@ impl Document {
         version_control_head: Option<Arc<ArcSwap<Box<str>>>>,
     ) {
         self.version_control_head = version_control_head;
+    }
+
+    #[cfg(feature = "git")]
+    pub fn blame(&self) -> Option<&Arc<Vec<BlameLine>>> {
+        self.blame.as_ref()
+    }
+
+    #[cfg(feature = "git")]
+    pub fn set_blame(&mut self, data: Vec<BlameLine>) {
+        self.blame = Some(Arc::new(data));
+    }
+
+    #[cfg(feature = "git")]
+    pub fn clear_blame(&mut self) {
+        self.blame = None;
     }
 
     #[inline]

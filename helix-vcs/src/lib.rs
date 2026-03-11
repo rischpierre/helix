@@ -20,6 +20,19 @@ mod status;
 
 pub use status::FileChange;
 
+#[cfg(feature = "git")]
+pub use git::BlameLine;
+
+#[cfg(feature = "git")]
+pub fn get_blame(file: &Path) -> anyhow::Result<Vec<BlameLine>> {
+    git::get_blame(file)
+}
+
+#[cfg(not(feature = "git"))]
+pub fn get_blame(_file: &Path) -> anyhow::Result<Vec<BlameLine>> {
+    anyhow::bail!("git support not compiled in")
+}
+
 /// Contains all active diff providers. Diff providers are compiled in via features. Currently
 /// only `git` is supported.
 #[derive(Clone)]
@@ -75,6 +88,21 @@ impl DiffProviderRegistry {
             }
         });
     }
+
+    /// Get the git blame information for a file.
+    #[cfg(feature = "git")]
+    pub fn get_blame(&self, file: &Path) -> Option<Vec<BlameLine>> {
+        self.providers
+            .iter()
+            .find_map(|provider| match provider.get_blame(file) {
+                Ok(res) => Some(res),
+                Err(err) => {
+                    log::debug!("{err:#?}");
+                    log::debug!("failed to obtain blame info for {}", file.display());
+                    None
+                }
+            })
+    }
 }
 
 impl Default for DiffProviderRegistry {
@@ -126,6 +154,15 @@ impl DiffProvider {
         match self {
             #[cfg(feature = "git")]
             Self::Git => git::for_each_changed_file(cwd, f),
+            Self::None => bail!("No diff support compiled in"),
+        }
+    }
+
+    #[cfg(feature = "git")]
+    fn get_blame(&self, file: &Path) -> Result<Vec<BlameLine>> {
+        match self {
+            #[cfg(feature = "git")]
+            Self::Git => git::get_blame(file),
             Self::None => bail!("No diff support compiled in"),
         }
     }

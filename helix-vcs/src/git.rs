@@ -22,6 +22,14 @@ use crate::FileChange;
 #[cfg(test)]
 mod test;
 
+#[derive(Clone, Debug)]
+pub struct BlameLine {
+    pub author: String,
+    pub date: String,
+    /// Unix timestamp of the commit
+    pub timestamp: i64,
+}
+
 #[inline]
 fn get_repo_dir(file: &Path) -> Result<&Path> {
     file.parent().context("file has no parent directory")
@@ -209,4 +217,101 @@ fn find_file_in_commit(repo: &Repository, commit: &Commit, file: &Path) -> Resul
         // found a file
         EntryKind::Blob | EntryKind::BlobExecutable => Ok(tree_entry.object_id()),
     }
+}
+
+pub fn get_blame(file: &Path) -> Result<Vec<BlameLine>> {
+    debug_assert!(!file.exists() || file.is_file());
+    debug_assert!(file.is_absolute());
+    let file = gix::path::realpath(file).context("resolve symlinks")?;
+
+    let repo_dir = get_repo_dir(&file)?;
+    let _repo = open_repo(repo_dir).context("failed to open git repo")?;
+
+    // Use git blame --porcelain to get commit info for each line
+    let output = std::process::Command::new("git")
+        .arg("blame")
+        .arg("--porcelain")
+        .arg(file.as_os_str())
+        .current_dir(repo_dir)
+        .output()
+        .context("failed to run git blame")?;
+
+    if !output.status.success() {
+        bail!(
+            "git blame failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    let blame_text = String::from_utf8(output.stdout).context("git blame output is not valid UTF-8")?;
+    let mut blame_lines = Vec::new();
+    let mut current_author = String::new();
+    let mut current_date = String::new();
+    let mut current_timestamp = 0i64;
+
+    for line in blame_text.lines() {
+        if line.starts_with("author ") {
+            current_author = line[7..].to_string();
+        } else if line.starts_with("author-time ") {
+            current_timestamp = line[12..].parse().unwrap_or(0);
+            // Convert Unix timestamp to YYYY-MM-DD format
+            current_date = format_date_from_system_time(current_timestamp);
+        } else if line.starts_with('\t') {
+            // This is the actual line content, so we record the current author/date
+            blame_lines.push(BlameLine {
+                author: current_author.clone(),
+                date: current_date.clone(),
+                timestamp: current_timestamp,
+            });
+        }
+    }
+
+    Ok(blame_lines)
+}
+
+/// Convert Unix timestamp to YYYY-MM-DD format using simple calculation.
+/// This avoids external date crate dependencies while remaining efficient.
+fn format_date_from_system_time(timestamp: i64) -> String {
+    // Days since epoch, accounting for leap years
+    const SECONDS_PER_DAY: i64 = 86400;
+
+    let days_since_epoch = timestamp / SECONDS_PER_DAY;
+
+    // Calculate year
+    let mut year = 1970;
+    let mut days_remaining = days_since_epoch;
+
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days_remaining < days_in_year {
+            break;
+        }
+        days_remaining -= days_in_year;
+        year += 1;
+    }
+
+    // Calculate month and day
+    let is_leap = is_leap_year(year);
+    let days_in_months = if is_leap {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    let mut day = days_remaining + 1; // Days are 1-indexed
+
+    for &days_in_month in &days_in_months {
+        if day <= days_in_month as i64 {
+            break;
+        }
+        day -= days_in_month as i64;
+        month += 1;
+    }
+
+    format!("{:04}-{:02}-{:02}", year, month, day)
+}
+
+fn is_leap_year(year: i64) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
