@@ -538,6 +538,23 @@ impl Application {
             scroll: None,
         };
         let should_render = self.compositor.handle_event(&Event::IdleTimeout, &mut cx);
+
+        // Refresh diff bases for all open documents to detect external git changes
+        let mut diff_updates = Vec::new();
+        for (doc_id, doc) in &self.editor.documents {
+            if let Some(path) = doc.path() {
+                if let Some(diff_base) = self.editor.diff_providers.get_diff_base(path) {
+                    diff_updates.push((*doc_id, diff_base));
+                }
+            }
+        }
+
+        for (doc_id, diff_base) in diff_updates {
+            if let Some(doc) = self.editor.document_mut(doc_id) {
+                doc.set_diff_base(diff_base);
+            }
+        }
+
         if should_render || self.editor.needs_redraw {
             self.render().await;
         }
@@ -572,6 +589,8 @@ impl Application {
 
         doc.set_last_saved_revision(doc_save_event.revision, doc_save_event.save_time);
 
+        let doc_path = doc.path().map(|p| p.to_owned());
+
         let lines = doc_save_event.text.len_lines();
         let mut sz = doc_save_event.text.len_bytes() as f32;
 
@@ -592,6 +611,15 @@ impl Application {
             sz,
             SUFFIX[i],
         ));
+
+        // Refresh the diff base to account for potential git commits
+        if let Some(path) = doc_path {
+            if let Some(diff_base) = self.editor.diff_providers.get_diff_base(&path) {
+                if let Some(doc) = self.editor.document_mut(doc_save_event.doc_id) {
+                    doc.set_diff_base(diff_base);
+                }
+            }
+        }
     }
 
     #[inline(always)]
